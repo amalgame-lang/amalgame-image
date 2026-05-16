@@ -1,0 +1,74 @@
+# Package manifest — amalgame-image
+#
+# Image decode + encode binding for Amalgame, built on Sean
+# Barrett's public-domain stb_image / stb_image_write single-
+# header libraries. Vendored at runtime/vendor/ — no external
+# dep at link time.
+#
+# Surface (v1):
+#   Load(path) / LoadFromBytes(bytes)
+#   IsValid / LastError
+#   Width / Height / Channels
+#   GetPixel(x, y) -> int (packed 0xRRGGBBAA)
+#   SetPixel(x, y, packed)
+#   SaveAsPng / SaveAsBmp / SaveAsTga / SaveAsJpg(quality)
+#   Free  (optional explicit cleanup; GC owns the buffer)
+#
+# Load formats: PNG / JPG / BMP / TGA / GIF (1st frame) /
+# PSD (composite) / HDR / PIC / PNM.
+# Save formats: PNG / BMP / TGA / JPG / HDR.
+#
+# Out of scope (v2):
+#   - Multi-frame GIF / WebP / AVIF / TIFF (different decoder)
+#   - Resize / rotate / blit / colour conversion (consider
+#     a sibling amalgame-image-ops package)
+#   - SIMD-accelerated paths (stb_image is portable C)
+#   - 16-bit per channel and HDR float pixel access
+#
+# Installation:
+#
+#   amc package add image                                # via index
+#   amc package add github.com/amalgame-lang/amalgame-image@v0.1.0
+
+[package]
+name              = "amalgame-image"
+version           = "0.1.0"
+license           = "Apache-2.0"
+description       = "Image decode/encode for Amalgame — stb_image + stb_image_write (public domain), vendored."
+authors           = ["Bastien Mouget"]
+required-amalgame = ">=0.5.4"
+schema-version    = 1
+
+[stdlib]
+class     = "Image"
+header    = "runtime/Amalgame_Image.h"
+namespace = "Amalgame.Image"
+
+# stb_image + stb_image_write materialised in one TU.
+# Precompiled once at `amc package add` time; reused across
+# every subsequent build via the platform-keyed cache.
+sources    = ["runtime/vendor/stb_impl.c"]
+precompile = true
+
+# stb is portable C with internal helpers that gcc warns on
+# (unused-function, sign-compare). amc adds -w under the hood,
+# but a tight -O2 keeps decode/encode hot paths fast.
+cflags     = "-O2"
+
+[stdlib.functions]
+Load           = { returns = "AmalgameImage*" }
+LoadFromBytes  = { returns = "AmalgameImage*" }
+IsValid        = { returns = "code_bool" }
+LastError      = { returns = "code_string" }
+Width          = { returns = "i64" }
+Height         = { returns = "i64" }
+Channels       = { returns = "i64" }
+GetPixel       = { returns = "i64" }
+SetPixel       = { returns = "void" }
+SaveAsPng      = { returns = "code_bool" }
+SaveAsBmp      = { returns = "code_bool" }
+SaveAsTga      = { returns = "code_bool" }
+SaveAsJpg      = { returns = "code_bool" }
+Free           = { returns = "void" }
+
+[dependencies]

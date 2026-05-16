@@ -1,0 +1,140 @@
+// Stdlib test: Amalgame.Image — image decode + encode via the
+// vendored stb_image / stb_image_write headers. Self-contained
+// (no network), deterministic for the lossless formats.
+//
+// Fixture: tests/run_tests.sh generates /tmp/amc_img_fixture.png
+// (4×2 RGBA) before invoking the test. Pixels:
+//   row 0: red opaque, green opaque, blue opaque, white opaque
+//   row 1: black opaque, gray opaque, white half, fully transparent
+// Same image is regenerated each run — no checked-in binary.
+
+namespace Tests
+
+import Amalgame.Image
+
+public class Program {
+    public static void Main(string[] args) {
+
+        // Pixel literals — Amalgame doesn't parse hex (0xFF reads
+        // as 0), and AM bit-shifts lower to C `int << int` that
+        // overflows for `255 << 24` before the i64 promotion. So
+        // we hard-code the packed RGBA values in decimal — they
+        // ARE i64 literals in AM.
+        // Layout: 0xRRGGBBAA → (R*16777216) + (G*65536) + (B*256) + A
+        let RED:    int = 4278190335    // 0xFF0000FF
+        let GREEN:  int = 16711935      // 0x00FF00FF
+        let BLUE:   int = 65535         // 0x0000FFFF
+        let WHITE:  int = 4294967295    // 0xFFFFFFFF
+        let MAGENTA_HALF: int = 4278255488    // 0xFF00FF80
+
+        // ── 1. Load fixture ────────────────────────────────────
+
+        let img = Image.Load("/tmp/amc_img_fixture.png")
+        if (Image.IsValid(img)) {
+            Console.WriteLine("[PASS] load fixture")
+        } else {
+            Console.WriteLine("[FAIL] load: " + Image.LastError(img))
+            return
+        }
+
+        // ── 2. Geometry ────────────────────────────────────────
+
+        if (Image.Width(img) == 4 && Image.Height(img) == 2) {
+            Console.WriteLine("[PASS] geometry 4x2")
+        } else {
+            Console.WriteLine("[FAIL] geometry got "
+                + String_FromInt(Image.Width(img)) + "x"
+                + String_FromInt(Image.Height(img)))
+        }
+
+        // Source channels — fixture is RGBA so channels==4.
+        if (Image.Channels(img) == 4) {
+            Console.WriteLine("[PASS] channels 4")
+        } else {
+            Console.WriteLine("[FAIL] channels got "
+                + String_FromInt(Image.Channels(img)))
+        }
+
+        // ── 3. Pixel reads — fixture's known palette ──────────
+
+        let p00: int = Image.GetPixel(img, 0, 0)
+        let p10: int = Image.GetPixel(img, 1, 0)
+        let p20: int = Image.GetPixel(img, 2, 0)
+        let p30: int = Image.GetPixel(img, 3, 0)
+        if (p00 == RED && p10 == GREEN && p20 == BLUE && p30 == WHITE) {
+            Console.WriteLine("[PASS] row0 palette")
+        } else {
+            Console.WriteLine("[FAIL] row0 got "
+                + String_FromInt(p00) + "/" + String_FromInt(p10)
+                + "/" + String_FromInt(p20) + "/" + String_FromInt(p30))
+        }
+
+        // ── 4. Out-of-bounds returns 0 silently ───────────────
+
+        let outside: int = Image.GetPixel(img, 999, 999)
+        if (outside == 0) {
+            Console.WriteLine("[PASS] out-of-bounds returns 0")
+        } else {
+            Console.WriteLine("[FAIL] out-of-bounds got "
+                + String_FromInt(outside))
+        }
+
+        // ── 5. Mutate + PNG round-trip preserves alpha ────────
+
+        Image.SetPixel(img, 0, 0, MAGENTA_HALF)
+        let painted: int = Image.GetPixel(img, 0, 0)
+        if (painted == MAGENTA_HALF) {
+            Console.WriteLine("[PASS] SetPixel in memory")
+        } else {
+            Console.WriteLine("[FAIL] SetPixel got "
+                + String_FromInt(painted))
+        }
+
+        let okPng: bool = Image.SaveAsPng(img, "/tmp/amc_img_test.png")
+        if (okPng) {
+            Console.WriteLine("[PASS] SaveAsPng")
+        } else {
+            Console.WriteLine("[FAIL] SaveAsPng: " + Image.LastError(img))
+        }
+
+        let reloaded = Image.Load("/tmp/amc_img_test.png")
+        let reloadedPixel: int = Image.GetPixel(reloaded, 0, 0)
+        if (reloadedPixel == MAGENTA_HALF) {
+            Console.WriteLine("[PASS] PNG round-trip preserves alpha")
+        } else {
+            Console.WriteLine("[FAIL] PNG round-trip got "
+                + String_FromInt(reloadedPixel))
+        }
+
+        // ── 6. TGA round-trip — also lossless ─────────────────
+
+        Image.SaveAsTga(img, "/tmp/amc_img_test.tga")
+        let tga = Image.Load("/tmp/amc_img_test.tga")
+        if (Image.IsValid(tga) && Image.GetPixel(tga, 0, 0) == MAGENTA_HALF) {
+            Console.WriteLine("[PASS] TGA round-trip")
+        } else {
+            Console.WriteLine("[FAIL] TGA round-trip")
+        }
+
+        // ── 7. JPG round-trip — lossy, only verify geometry ───
+
+        Image.SaveAsJpg(img, "/tmp/amc_img_test.jpg", 90)
+        let jpg = Image.Load("/tmp/amc_img_test.jpg")
+        if (Image.IsValid(jpg) && Image.Width(jpg) == 4 && Image.Height(jpg) == 2) {
+            Console.WriteLine("[PASS] JPG round-trip geometry")
+        } else {
+            Console.WriteLine("[FAIL] JPG round-trip")
+        }
+
+        // ── 8. Explicit Free (idempotent) ─────────────────────
+
+        Image.Free(img)
+        if (!Image.IsValid(img)) {
+            Console.WriteLine("[PASS] Free invalidates handle")
+        } else {
+            Console.WriteLine("[FAIL] handle still valid after Free")
+        }
+        Image.Free(img)
+        Console.WriteLine("[PASS] Free is idempotent")
+    }
+}
