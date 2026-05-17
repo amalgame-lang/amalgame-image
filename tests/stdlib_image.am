@@ -136,5 +136,134 @@ public class Program {
         }
         Image.Free(img)
         Console.WriteLine("[PASS] Free is idempotent")
+
+        // ═══════════════════════════════════════════════════════
+        //  v0.2 — typed accessors + Create/Fill + Resize/Crop +
+        //         Flip/Rotate
+        // ═══════════════════════════════════════════════════════
+
+        // ── 9. Create + Fill ──────────────────────────────────
+
+        let canvas = Image.Create(16, 8, BLUE)
+        if (Image.IsValid(canvas)
+            && Image.Width(canvas) == 16
+            && Image.Height(canvas) == 8) {
+            Console.WriteLine("[PASS] Create 16x8")
+        } else {
+            Console.WriteLine("[FAIL] Create geometry")
+        }
+        if (Image.GetPixel(canvas, 0, 0) == BLUE
+            && Image.GetPixel(canvas, 15, 7) == BLUE) {
+            Console.WriteLine("[PASS] Create fills with packed colour")
+        } else {
+            Console.WriteLine("[FAIL] Create fill mismatch")
+        }
+
+        Image.Fill(canvas, GREEN)
+        if (Image.GetPixel(canvas, 5, 5) == GREEN) {
+            Console.WriteLine("[PASS] Fill replaces all pixels")
+        } else {
+            Console.WriteLine("[FAIL] Fill: got "
+                + String_FromInt(Image.GetPixel(canvas, 5, 5)))
+        }
+
+        // ── 10. Typed RGBA accessors ──────────────────────────
+
+        Image.SetRGBA(canvas, 3, 4, 200, 100, 50, 255)
+        let r3 = Image.GetR(canvas, 3, 4)
+        let g3 = Image.GetG(canvas, 3, 4)
+        let b3 = Image.GetB(canvas, 3, 4)
+        let a3 = Image.GetA(canvas, 3, 4)
+        if (r3 == 200 && g3 == 100 && b3 == 50 && a3 == 255) {
+            Console.WriteLine("[PASS] SetRGBA + Get[RGBA]")
+        } else {
+            Console.WriteLine("[FAIL] typed accessors got "
+                + String_FromInt(r3) + "/"
+                + String_FromInt(g3) + "/"
+                + String_FromInt(b3) + "/"
+                + String_FromInt(a3))
+        }
+
+        // ── 11. Resize ────────────────────────────────────────
+
+        let resized = Image.Resize(canvas, 8, 4)
+        if (Image.IsValid(resized)
+            && Image.Width(resized) == 8
+            && Image.Height(resized) == 4) {
+            Console.WriteLine("[PASS] Resize to 8x4")
+        } else {
+            Console.WriteLine("[FAIL] Resize: "
+                + Image.LastError(resized))
+        }
+
+        // ── 12. FlipH — pixel at (3,4) moves to (12,4) ────────
+
+        Image.FlipH(canvas)
+        let movedR = Image.GetR(canvas, 12, 4)
+        if (movedR == 200) {
+            Console.WriteLine("[PASS] FlipH moves (3,4) -> (12,4)")
+        } else {
+            Console.WriteLine("[FAIL] FlipH got R="
+                + String_FromInt(movedR))
+        }
+
+        // ── 13. FlipV — restore canvas first, then check ──────
+        //   canvas right now has the FlipH still applied; FlipV
+        //   on top moves the (12,4) pixel to (12, 8-1-4 = 3).
+
+        Image.FlipV(canvas)
+        let movedR2 = Image.GetR(canvas, 12, 3)
+        if (movedR2 == 200) {
+            Console.WriteLine("[PASS] FlipV moves (12,4) -> (12,3)")
+        } else {
+            Console.WriteLine("[FAIL] FlipV got R="
+                + String_FromInt(movedR2))
+        }
+
+        // ── 14. Rotate180 = FlipH+FlipV reversed in one pass ──
+
+        let rotCheck = Image.Create(4, 2, GREEN)
+        Image.SetRGBA(rotCheck, 0, 0, 255, 0, 0, 255)   // top-left red
+        Image.Rotate180(rotCheck)
+        // Top-left → bottom-right after 180°.
+        if (Image.GetR(rotCheck, 3, 1) == 255
+            && Image.GetG(rotCheck, 3, 1) == 0
+            && Image.GetB(rotCheck, 3, 1) == 0) {
+            Console.WriteLine("[PASS] Rotate180 maps (0,0) -> (3,1)")
+        } else {
+            Console.WriteLine("[FAIL] Rotate180 wrong dest")
+        }
+
+        // ── 15. Crop — sub-rect copy ──────────────────────────
+
+        let cropSrc = Image.Create(10, 10, BLUE)
+        Image.SetRGBA(cropSrc, 5, 5, 255, 128, 64, 255)
+        let cropped = Image.Crop(cropSrc, 3, 3, 5, 5)
+        if (Image.IsValid(cropped)
+            && Image.Width(cropped) == 5
+            && Image.Height(cropped) == 5
+            && Image.GetR(cropped, 2, 2) == 255       // (5,5) src -> (2,2) dst
+            && Image.GetG(cropped, 2, 2) == 128
+            && Image.GetB(cropped, 2, 2) == 64) {
+            Console.WriteLine("[PASS] Crop sub-rect preserves pixels")
+        } else {
+            Console.WriteLine("[FAIL] Crop mismatch")
+        }
+
+        // ── 16. Crop clamps an out-of-range window ────────────
+
+        let clamped = Image.Crop(cropSrc, -5, -5, 4, 4)
+        if (Image.IsValid(clamped)
+            && Image.Width(clamped) == 4 - 1
+            && Image.Height(clamped) == 4 - 1) {
+            // window: x=-5..-1 ∩ 0..9 = empty? No: x=-5..-1 → after
+            // clamping x0=0, x1=min(-5+4,10)=-1 → invalid window.
+            // Crop returns "empty window" error. This branch
+            // shouldn't fire; see [FAIL] line below for the path
+            // we actually expect.
+            Console.WriteLine("[FAIL] Crop should have rejected window")
+        } else if (!Image.IsValid(clamped)) {
+            Console.WriteLine("[PASS] Crop rejects empty window")
+        }
     }
 }
