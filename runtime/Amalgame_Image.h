@@ -4,7 +4,8 @@
  * https://github.com/amalgame-lang/Amalgame
  *
  * Image decode + encode binding on top of Sean Barrett's public-
- * domain stb_image / stb_image_write single-header libraries.
+ * domain stb_image / stb_image_write / stb_image_resize2 single-
+ * header libraries.
  *
  * Surface (v1):
  *   Load(path) / LoadFromBytes(bytes)            decode image file → handle
@@ -17,6 +18,15 @@
  *   Free(img)                                    no-op (GC owns the
  *                                                pixel buffer); kept
  *                                                for explicit ergonomics
+ *
+ * Surface (v0.2 additions):
+ *   Create(w, h, packed)           -> AmalgameImage*    build from scratch
+ *   Fill(img, packed)                                   solid colour
+ *   GetR / GetG / GetB / GetA(x, y) -> int (0..255)     typed channel reads
+ *   SetRGBA(x, y, r, g, b, a)                           typed channel writes
+ *   Resize(img, newW, newH)        -> AmalgameImage*    Mitchell/cubic resample
+ *   FlipH(img) / FlipV(img) / Rotate180(img)            in-place transforms
+ *   Crop(img, x, y, w, h)          -> AmalgameImage*    sub-rect copy
  *
  * Format coverage (load): PNG, JPG, BMP, TGA, GIF (first frame),
  * PSD (composite), HDR, PIC, PNM.
@@ -45,6 +55,7 @@
 #include "Amalgame_Collections.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
+#include "stb_image_resize2.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -241,6 +252,253 @@ static inline void Amalgame_Image_Free(AmalgameImage* img) {
         stbi_image_free(img->pixels);
         img->pixels = NULL;
         img->freed  = 1;
+    }
+}
+
+/* ═══════════════════════════════════════════════════════
+ *  v0.2 — typed accessors + ops + Create/Fill
+ * ═══════════════════════════════════════════════════════
+ *
+ * The v0.1 GetPixel/SetPixel packed-int API stays the canonical
+ * way to read/write a whole pixel atomically; the per-channel
+ * accessors below are a convenience layer over the same buffer.
+ * Resize / Crop allocate fresh handles (with their own malloc'd
+ * pixel buffer + finalizer), flip / rotate operate in place.
+ */
+
+/* ── Typed RGBA accessors ─────────────────────────────── */
+
+static inline i64 Amalgame_Image_GetR(AmalgameImage* img, i64 x, i64 y) {
+    if (!Amalgame_Image_IsValid(img)) return 0;
+    if (x < 0 || y < 0 || x >= img->width || y >= img->height) return 0;
+    size_t off = ((size_t) y * (size_t) img->width + (size_t) x) * 4;
+    return (i64) img->pixels[off + 0];
+}
+
+static inline i64 Amalgame_Image_GetG(AmalgameImage* img, i64 x, i64 y) {
+    if (!Amalgame_Image_IsValid(img)) return 0;
+    if (x < 0 || y < 0 || x >= img->width || y >= img->height) return 0;
+    size_t off = ((size_t) y * (size_t) img->width + (size_t) x) * 4;
+    return (i64) img->pixels[off + 1];
+}
+
+static inline i64 Amalgame_Image_GetB(AmalgameImage* img, i64 x, i64 y) {
+    if (!Amalgame_Image_IsValid(img)) return 0;
+    if (x < 0 || y < 0 || x >= img->width || y >= img->height) return 0;
+    size_t off = ((size_t) y * (size_t) img->width + (size_t) x) * 4;
+    return (i64) img->pixels[off + 2];
+}
+
+static inline i64 Amalgame_Image_GetA(AmalgameImage* img, i64 x, i64 y) {
+    if (!Amalgame_Image_IsValid(img)) return 0;
+    if (x < 0 || y < 0 || x >= img->width || y >= img->height) return 0;
+    size_t off = ((size_t) y * (size_t) img->width + (size_t) x) * 4;
+    return (i64) img->pixels[off + 3];
+}
+
+/* Each component is masked to 0..255 (silently). Lets callers
+ * compute pixel values in any int range without worrying about
+ * overflow into adjacent channels. */
+static inline void Amalgame_Image_SetRGBA(AmalgameImage* img,
+                                            i64 x, i64 y,
+                                            i64 r, i64 g, i64 b, i64 a) {
+    if (!Amalgame_Image_IsValid(img)) return;
+    if (x < 0 || y < 0 || x >= img->width || y >= img->height) return;
+    size_t off = ((size_t) y * (size_t) img->width + (size_t) x) * 4;
+    img->pixels[off + 0] = (unsigned char) (r & 0xFF);
+    img->pixels[off + 1] = (unsigned char) (g & 0xFF);
+    img->pixels[off + 2] = (unsigned char) (b & 0xFF);
+    img->pixels[off + 3] = (unsigned char) (a & 0xFF);
+}
+
+/* ── Create + Fill ────────────────────────────────────── */
+
+/* Allocate a fresh w × h RGBA image initialised to `packed`
+ * (0xRRGGBBAA). Returns an image with IsValid=true and channels=4
+ * unless w/h is non-positive (in which case the handle reports
+ * a "bad dimensions" LastError + IsValid=false). The pixel buffer
+ * is malloc'd through stb's allocator so the existing finalizer
+ * (stbi_image_free) reclaims it. */
+static inline AmalgameImage* Amalgame_Image_Create(i64 width, i64 height, i64 packed) {
+    AmalgameImage* img = _amimg_alloc();
+    if (width <= 0 || height <= 0) {
+        img->last_error = _amimg_err_dup("Create: width/height must be > 0");
+        return img;
+    }
+    size_t n = (size_t) width * (size_t) height * 4;
+    unsigned char* px = (unsigned char*) malloc(n);
+    if (!px) {
+        img->last_error = _amimg_err_dup("Create: malloc failed");
+        return img;
+    }
+    unsigned char r = (unsigned char) ((packed >> 24) & 0xFF);
+    unsigned char g = (unsigned char) ((packed >> 16) & 0xFF);
+    unsigned char b = (unsigned char) ((packed >>  8) & 0xFF);
+    unsigned char a = (unsigned char) ( packed        & 0xFF);
+    for (size_t i = 0; i < n; i += 4) {
+        px[i + 0] = r;
+        px[i + 1] = g;
+        px[i + 2] = b;
+        px[i + 3] = a;
+    }
+    img->pixels   = px;
+    img->width    = (int) width;
+    img->height   = (int) height;
+    img->channels = 4;
+    return img;
+}
+
+/* Repaint every pixel of an existing image to `packed`. */
+static inline void Amalgame_Image_Fill(AmalgameImage* img, i64 packed) {
+    if (!Amalgame_Image_IsValid(img)) return;
+    size_t n = (size_t) img->width * (size_t) img->height * 4;
+    unsigned char r = (unsigned char) ((packed >> 24) & 0xFF);
+    unsigned char g = (unsigned char) ((packed >> 16) & 0xFF);
+    unsigned char b = (unsigned char) ((packed >>  8) & 0xFF);
+    unsigned char a = (unsigned char) ( packed        & 0xFF);
+    for (size_t i = 0; i < n; i += 4) {
+        img->pixels[i + 0] = r;
+        img->pixels[i + 1] = g;
+        img->pixels[i + 2] = b;
+        img->pixels[i + 3] = a;
+    }
+}
+
+/* ── Resize / Crop (allocate fresh handles) ──────────── */
+
+/* High-quality resampling via stb_image_resize2 (Mitchell on the
+ * downsample path, cubic on upsample, clamps to edge). Returns a
+ * new handle; the input is not mutated. */
+static inline AmalgameImage* Amalgame_Image_Resize(AmalgameImage* src,
+                                                     i64 newWidth, i64 newHeight) {
+    AmalgameImage* out = _amimg_alloc();
+    if (!Amalgame_Image_IsValid(src)) {
+        out->last_error = _amimg_err_dup("Resize: invalid source image");
+        return out;
+    }
+    if (newWidth <= 0 || newHeight <= 0) {
+        out->last_error = _amimg_err_dup("Resize: width/height must be > 0");
+        return out;
+    }
+    size_t n = (size_t) newWidth * (size_t) newHeight * 4;
+    unsigned char* px = (unsigned char*) malloc(n);
+    if (!px) {
+        out->last_error = _amimg_err_dup("Resize: malloc failed");
+        return out;
+    }
+    unsigned char* rc = stbir_resize_uint8_srgb(
+        src->pixels, src->width, src->height, src->width * 4,
+        px,          (int) newWidth, (int) newHeight, (int) newWidth * 4,
+        STBIR_RGBA);
+    if (!rc) {
+        free(px);
+        out->last_error = _amimg_err_dup("Resize: stbir_resize_uint8_srgb failed");
+        return out;
+    }
+    out->pixels   = px;
+    out->width    = (int) newWidth;
+    out->height   = (int) newHeight;
+    out->channels = 4;
+    return out;
+}
+
+/* Sub-rectangle copy. (x, y) is the top-left of the crop window
+ * in source coords; (w, h) is its size. Negative coords or a
+ * window that escapes the source image clamp at the edge; if the
+ * window is empty after clamping, the returned image carries a
+ * "Crop: empty window" LastError. */
+static inline AmalgameImage* Amalgame_Image_Crop(AmalgameImage* src,
+                                                   i64 x, i64 y, i64 w, i64 h) {
+    AmalgameImage* out = _amimg_alloc();
+    if (!Amalgame_Image_IsValid(src)) {
+        out->last_error = _amimg_err_dup("Crop: invalid source image");
+        return out;
+    }
+    /* Clamp the window to the source rect. */
+    i64 sx0 = x < 0 ? 0 : x;
+    i64 sy0 = y < 0 ? 0 : y;
+    i64 sx1 = x + w; if (sx1 > src->width)  sx1 = src->width;
+    i64 sy1 = y + h; if (sy1 > src->height) sy1 = src->height;
+    i64 cw = sx1 - sx0;
+    i64 ch = sy1 - sy0;
+    if (cw <= 0 || ch <= 0) {
+        out->last_error = _amimg_err_dup("Crop: empty window");
+        return out;
+    }
+    size_t n = (size_t) cw * (size_t) ch * 4;
+    unsigned char* px = (unsigned char*) malloc(n);
+    if (!px) {
+        out->last_error = _amimg_err_dup("Crop: malloc failed");
+        return out;
+    }
+    int stride = src->width * 4;
+    for (i64 row = 0; row < ch; row++) {
+        unsigned char* srow = src->pixels + ((sy0 + row) * stride) + (sx0 * 4);
+        unsigned char* drow = px + (row * cw * 4);
+        memcpy(drow, srow, (size_t) cw * 4);
+    }
+    out->pixels   = px;
+    out->width    = (int) cw;
+    out->height   = (int) ch;
+    out->channels = 4;
+    return out;
+}
+
+/* ── In-place transforms ─────────────────────────────── */
+
+/* Horizontal flip — column x becomes column (width-1-x). */
+static inline void Amalgame_Image_FlipH(AmalgameImage* img) {
+    if (!Amalgame_Image_IsValid(img)) return;
+    int w = img->width, h = img->height;
+    int stride = w * 4;
+    for (int y = 0; y < h; y++) {
+        unsigned char* row = img->pixels + y * stride;
+        for (int x = 0; x < w / 2; x++) {
+            unsigned char* a = row + x * 4;
+            unsigned char* b = row + (w - 1 - x) * 4;
+            unsigned char tmp[4];
+            memcpy(tmp, a, 4);
+            memcpy(a,   b, 4);
+            memcpy(b, tmp, 4);
+        }
+    }
+}
+
+/* Vertical flip — row y becomes row (height-1-y). */
+static inline void Amalgame_Image_FlipV(AmalgameImage* img) {
+    if (!Amalgame_Image_IsValid(img)) return;
+    int w = img->width, h = img->height;
+    int stride = w * 4;
+    unsigned char* tmp = (unsigned char*) malloc((size_t) stride);
+    if (!tmp) {
+        img->last_error = _amimg_err_dup("FlipV: malloc failed");
+        return;
+    }
+    for (int y = 0; y < h / 2; y++) {
+        unsigned char* a = img->pixels + y * stride;
+        unsigned char* b = img->pixels + (h - 1 - y) * stride;
+        memcpy(tmp, a, (size_t) stride);
+        memcpy(a,   b, (size_t) stride);
+        memcpy(b, tmp, (size_t) stride);
+    }
+    free(tmp);
+}
+
+/* 180° rotation = FlipH + FlipV; doing it as one pass spares a
+ * second buffer traversal. */
+static inline void Amalgame_Image_Rotate180(AmalgameImage* img) {
+    if (!Amalgame_Image_IsValid(img)) return;
+    int w = img->width, h = img->height;
+    size_t n = (size_t) w * (size_t) h;
+    unsigned char* px = img->pixels;
+    /* Pixel i ↔ pixel (n - 1 - i). Walk halves so each swap fires once. */
+    for (size_t i = 0; i < n / 2; i++) {
+        unsigned char* a = px + i * 4;
+        unsigned char* b = px + (n - 1 - i) * 4;
+        unsigned char tmp[4];
+        memcpy(tmp, a, 4);
+        memcpy(a,   b, 4);
+        memcpy(b, tmp, 4);
     }
 }
 

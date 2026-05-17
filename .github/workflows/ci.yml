@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test against amc ${{ matrix.amc-tag }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # v0.8.22 is the floor for amc's current cgen — older releases
+        # don't ship the runtime header set this package's tests
+        # include via stb_image_resize2.h passes (no amc dep) but the
+        # stdlib_image.am test program needs the v0.8 typed-collection
+        # cgen behaviour. Re-test against the next tagged release.
+        amc-tag: [v0.8.22]
+    steps:
+      - name: Checkout package
+        uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libgc-dev libcurl4-openssl-dev
+
+      - name: Download amc ${{ matrix.amc-tag }}
+        run: |
+          set -e
+          # GitHub Releases bundles amc + runtime/ in a tar.gz per
+          # platform — see amalgame-lang/Amalgame release.yml.
+          TAG="${{ matrix.amc-tag }}"
+          VERSION="${TAG#v}"
+          curl -sSL -o amc.tar.gz \
+            "https://github.com/amalgame-lang/Amalgame/releases/download/${TAG}/amc-${VERSION}-linux-x86_64.tar.gz"
+          mkdir -p $RUNNER_TEMP/amc-install
+          tar -xzf amc.tar.gz -C $RUNNER_TEMP/amc-install --strip-components=1
+          echo "AMC=$RUNNER_TEMP/amc-install/amc" >> $GITHUB_ENV
+          echo "AMC_RUNTIME=$RUNNER_TEMP/amc-install/runtime" >> $GITHUB_ENV
+
+      - name: Verify amc
+        run: $AMC --version
+
+      - name: Run tests
+        run: ./tests/run_tests.sh "$AMC"
